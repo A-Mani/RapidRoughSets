@@ -1,0 +1,87 @@
+---
+output: html_document
+---
+<!--
+%\VignetteEngine{knitr}
+%\VignetteIndexEntry{}
+%\VignetteDepends{<your_package_name>}
+-->
+
+```{r load, echo=FALSE, message=FALSE, warning=FALSE}
+  knitr::opts_chunk$set(warning=FALSE, echo=FALSE, results='asis')
+```
+
+
+
+```{r queryData, echo=FALSE, message=FALSE, warning=FALSE}
+
+Sys.setenv(TZ="UTC")
+  
+categoryQuery = "
+        SELECT child_category_id, parent_category_id, level_no_child, level_no_parent 
+        FROM d_hierarchy_bridge 
+        INNER JOIN d_hierarchies ON d_hierarchy_bridge.hierarchy_id = d_hierarchies.hierarchy_id 
+        WHERE hierarchy_key = 'product' AND level_no_parent < level_no_child
+"
+  
+query = "
+   SELECT 
+          cust.customers_nk customerID, 
+          f_orders.products_quantity productQuantity,
+          f_orders.final_price price,
+          p.products_id productID, 
+          p.products_name productName, 
+          cg.categories_id categoryID,
+          cg2.categories_id topcategoryID,
+          cg2.category_name as topcatname
+        FROM f_orders 
+          JOIN d_calendar cal ON cal.date_key = f_orders.sales_date 
+          JOIN d_customers cust ON cust.customers_id = f_orders.customers_id 
+          JOIN d_products p ON f_orders.products_id = p.products_id 
+          
+          JOIN d_dimension_category dc ON dc.`dimension_id` = p.`products_id` 
+          JOIN d_categories cg ON dc.categories_id = cg.categories_id and dc.hierarchy_id = cg.hierarchy_id 
+          JOIN d_hierarchies h on (cg.hierarchy_id = h.hierarchy_id AND h.hierarchy_key = 'product')  
+
+    		  JOIN d_hierarchy_bridge bg on (dc.categories_id = bg.child_category_id and dc.hierarchy_id = bg.hierarchy_id AND bg.level_no_parent = 1)
+    		  JOIN d_categories cg2 on (bg.parent_category_id = cg2.categories_id and bg.hierarchy_id = cg2.hierarchy_id)
+    		  JOIN d_hierarchies h2 on (cg.hierarchy_id = h2.hierarchy_id and h2.hierarchy_key = 'product')
+
+        WHERE 
+          f_orders.customers_id >= 0 AND 
+          coalesce(f_orders.final_price, 0) > 0 AND 
+          cal.date_as_date >= '2014-01-01' AND 
+          cal.date_as_date < date_add('2015-12-31', interval 1 day)
+"
+  dbInfo = list(group="zoined_devmart", password="F0rY0urEyesOnly", dbname="dev_boulevarddw")
+  conn = do.call(zoined::dw.connect, dbInfo)
+  DT.raw = zoined::dw.fetch(conn, query)
+  categories = zoined::dw.fetch(conn, categoryQuery)
+  RMySQL::dbDisconnect(conn)
+  
+ 
+  
+```
+
+```{r compute}
+  output = customersegmentation.productbuying::createClusters(DT.raw, categories, ks=5:7, nThreads=1)
+  #output2 = customersegmentation.productbuying::assignClusters(output$prototypes, DT.raw, categories)
+  clusters = output$grouping
+  data.table::setkey(clusters, customers_id)
+  data.table::setkey(DT.raw, customerID)
+  
+  combined = DT.raw[clusters]    
+  sizes = combined[,.(total=sum(productQuantity*price), name=paste(head(topcatname,1), cluster_id)),keyby=.(cluster_id, topcategoryID)]
+  sizes = sizes[,.SD[order(-total), .(topcategoryID=topcategoryID, name=name, total=total, part=total/sum(.SD[,total]))][1], keyby=cluster_id]
+
+  data.table::setkey(clusters, cluster_id)
+
+  analysis_id = digest::digest(as.numeric(lubridate::now()))
+
+  clusters = clusters[sizes[,.(cluster_id, name)]][, analysis_id := analysis_id][, cluster_char := cluster_id]
+  
+  tables = list(product_buying_cluster=clusters)
+    
+```
+
+
